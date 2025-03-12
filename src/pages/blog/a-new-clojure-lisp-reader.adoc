@@ -1,0 +1,132 @@
+---
+status: EARLY DRAFT
+---
+
+= Reducing Clojure's parenthetical load: announcing a new LISP reader
+
+At JUXT, we've been working with Clojure for over twelve years now - safe to say, in that time, we've written a _lot_ of parentheses.
+
+Indeed, it's one of the most common objections to Clojure we hear from developers used to C-style languages: "there's too many brackets" (or "they're not where brackets should be") - many of them evidently still have painful memories of earlier LISPs from their university days.
+
+Seasoned Clojure programmers, of course, understand _why_ it is this way - the properties of 'homoiconicity' (often expressed as 'code = data') bring a level of simplicity, elegance and power unmatched outside of other LISPs - but also that, with structural editing and standard indentation conventions, you soon stop fixating on the brackets.
+
+https://xkcd.com/297/
+
+For example, through homoiconicity, syntactic macros can transform Clojure code in exactly the same way as normal functions transform Clojure data.
+Other solutions to this problem seem to be far less elegant (https://wiki.haskell.org/Template_Haskell:[template Haskell], https://doc.rust-lang.org/book/ch20-06-macros.html[Rust] or https://docs.scala-lang.org/scala3/guides/macros/macros.html[Scala] 'macros', for example), or downright scary (C's `#define`, `#ifdef`) - none of which come close to the ease-of-use and safety of LISP macros.
+
+Homoiconicity is also a pre-requisite for structural editing.
+Before I wrote Clojure, I wasn't aware of how much I would come to rely on it - I naively wrote code (Java, in my case) just fine without it, albeit with much more use of Ctrl-C, Ctrl-V, and the weird little supposedly rodent-shaped peripheral now gathering dust next to my keyboard.
+
+Now, though, you'd have to pry https://calva.io/paredit/[Paredit] from my cold, dead hands.
+It's hard to express the magnitude of the change in mindset that this brings - together with the expression-oriented nature of Clojure, the building blocks of your application becomes a lot more composable when each sub-expression can be independently manipulated, extracted or evaluated.
+
+== It's not just the parens
+
+Seasoned Clojure programmers, though, also realise that there is far more to the joy of writing Clojure than its LISP heritage - value left largely unrealised because of the (undeserved) first impressions of its syntax.
+
+* For some, it's the functional programming paradigm: the immutability-by-default, the emphasis on carefully isolating side-effects from pure, side-effect free code.
+* For many, it's the REPL environment: the fast feedback loop, the interactivity, the development flow.
+* For others, it's the simple data structures: the representation of your domain in ceremony-free maps, vectors and sets.
+
+Frankly, this is a real shame - we believe that it's these factors that have had a significant hand in reducing the cost of the applications we've delivered, and we'd love to share these benefits more widely!
+
+== The way forward
+
+Recency, https://shaunlebron.github.io/parinfer/[Parinfer^] has shown that enough Clojure developers format their code consistently, to the extent that it can rely on the indentation (and changes thereof) to infer what parens the user intended - if it is only the initial look-and-feel of the parens that's preventing a larger uptake for our favourite language, we should be able to do something about it.
+
+To that end, in order to reduce this impression, we're pleased to announce the initial release of a *Clojure LISP reader fork* with support for limited *Python-inspired, semantic whitespace*.
+We've designed it to be backwards-compatible - existing Clojure s-expressions (and, by extension, Clojure files) that use Clojure-idiomatic indentation all parse as they currently do, and the homoiconicity properties are preserved - but users can now optionally elide parentheses where the semantics are unambiguous from the indentation.
+
+The rules are simple:
+
+* Lines that contain more than one expression are implicitly wrapped in a list.
+* Subsequent lines that are indented further are considered part of that line's 'line group'.
+* Line groups may be nested in a right-associative manner, or 'outside-in'.
+* Expressions at the top-level of a line's line-group become elements nested in its list (again, applying outside-in).
+* Within `()`, `[]` or `{}`, semantic-whitespace processing is paused - expressions within are just considered normal elements of the respective collection.
+  This helps ensure the backwards-compatibility with existing Clojure files.
+* A `\` symbol at the end of a line continues the list on the next line, with the same nesting (like Bash et al).
+* A `$` symbol within a collection restarts semantic-whitespace handling, inferring lists by the rules above - taking inspiration from Haskell's `$` operator to further reduce the paren count.
+* Lines for which the first non-whitespace character is a `;` are effectively ignored by the semantic-whitespace parser.
+
+The parser itself only applies during the read-phase - it translates semantic-whitespace code into normal s-expressions which are then processed by the Clojure compiler as normal.
+
+We obviously don't want to lose structural editing, so we'll shortly be implementing support for this within the various Paredit plugins too, in order that slurping and barfing still work as expected.
+
+Some examples:
+
+* A simple one to get started:
++
+--
+[source,clojure]
+----
+(defn with-name [user first-name last-name]
+  (assoc user :first-name first-name, :last-name last-name))
+
+;; becomes
+
+defn with-name [user first-name last-name]
+  assoc user :first-name first-name, :last-name last-name
+
+;; or
+
+defn with-name [user first-name last-name]
+  -> user
+     assoc :first-name first-name \
+           :last-name last-name
+----
+--
+* Larger example: a round-trip test from XTDB 2:
++
+--
+[source,clojure]
+----
+ns xtdb.round-trip-test
+  :require [xtdb.api :as xt]
+           [xtdb.node :as xtn]
+
+t/deftest test-round-trip
+  with-open [node (xtn/start-node)] ; still use parens where it makes sense to
+    xt/execute-tx node [[:put-docs :users {:xt/id :jms, :name "James"}]]
+
+    t/is
+      = [{:xt/id :jms, :name "James"}]
+        xt/q node "SELECT * FROM users"
+----
+--
+* Some actual code from XT 2
++
+--
+[source,clojure]
+----
+defn- supersede-partial-tries [tries {:keys [block-idx]} {:keys [file-size-target]}]
+  ->> tries
+      map $ fn [{other-block-idx :block-idx, other-size :data-file-size, other-state :state, :as other-trie}]
+              cond-> other-trie
+                ;; I'd personally still use parens for smaller exprs
+                and (= other-state :live)
+                    (< other-size file-size-target)
+                    (<= other-block-idx block-idx)
+                assoc :state :garbage
+
+;; original for comparison
+(defn- supersede-partial-tries [tries {:keys [block-idx]} {:keys [file-size-target]}]
+  (->> tries
+       (map (fn [{other-block-idx :block-idx, other-size :data-file-size, other-state :state, :as other-trie}]
+              (cond-> other-trie
+                (and (= other-state :live)
+                     (< other-size file-size-target)
+                     (<= other-block-idx block-idx))
+                (assoc :state :garbage))))))
+----
+--
+
+== Getting started
+
+To get started, head over to the https://en.wikipedia.org/wiki/April_Fools%27_Day[GitHub repo].
+We'd love to hear your thoughts in the comments!
+
+Hope you're having a great April Fools' Day,
+
+James
